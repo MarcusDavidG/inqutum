@@ -23,6 +23,9 @@ import { healthHandler, readinessHandler } from './health';
 import { securityHeaders } from './security/content-safety';
 import { correlationMiddleware } from './observability/telemetry';
 import { buildUserSafeErrorResponse, classifyError } from './errors/error-taxonomy';
+import { authenticate, requirePermission } from './middleware/access-control';
+import { createDisputeRouter } from './routes/dispute.routes';
+import { createRiskRouter } from './routes/risk.routes';
 
 import { validateEnvironment } from './config/env-validator';
 import { VERIFICATION_CONTRACT_VERSION } from './services/payment-verification';
@@ -88,6 +91,10 @@ app.use('/api', createAuditRouter({ storage: memoryInvoiceStorage }));
 app.use('/api', createObservabilityRouter({ storage: memoryInvoiceStorage }));
 app.use('/api', createNotificationRouter());
 app.use('/api', createExportRouter({ storage: memoryInvoiceStorage }));
+
+// Settlement disputes and safe counterparty risk summaries (#190, #191)
+app.use('/api', createDisputeRouter());
+app.use('/api', createRiskRouter());
 
 // Mock Stellar endpoint (MVP only)
 app.get('/api/stellar/account', authenticate(), requirePermission('stellar:read'), (req: Request, res: Response) => {

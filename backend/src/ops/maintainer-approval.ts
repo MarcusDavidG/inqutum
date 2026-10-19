@@ -110,6 +110,20 @@ const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 
 export type ActionExecutor = (intent: MaintainerIntent) => Promise<unknown>;
 
+/**
+ * The part of a freeze-window service the approval flow needs. Kept structural
+ * so the approval service does not depend on the freeze implementation.
+ */
+export interface ActionFreezeGuard {
+  assertAllowed(input: {
+    action: string;
+    target: string;
+    actor: string;
+    bypassId?: string;
+    consume?: boolean;
+  }): unknown;
+}
+
 export interface ApprovalServiceOptions {
   secret: string;
   now?: () => Date;
@@ -118,6 +132,12 @@ export interface ApprovalServiceOptions {
   onReceipt?: (receipt: IntentReceipt) => void;
   /** Risk scorer for declared intents. Defaults to one on the same clock; `null` disables scoring. */
   risk?: RiskScorer | null;
+  /**
+   * Optional operational freeze guard (#194). When an action is frozen, intent
+   * declaration and execution throw the guard's error unless a valid emergency
+   * bypass is supplied.
+   */
+  freeze?: ActionFreezeGuard | null;
 }
 
 export class MaintainerApprovalService {
@@ -127,6 +147,7 @@ export class MaintainerApprovalService {
   private readonly now: () => Date;
   private readonly actions: Record<string, HighImpactActionSpec>;
   private readonly risk: RiskScorer | null;
+  private readonly freeze: ActionFreezeGuard | null;
 
   constructor(private readonly options: ApprovalServiceOptions) {
     if (!options.secret || options.secret.length < 16) {
@@ -135,6 +156,7 @@ export class MaintainerApprovalService {
     this.now = options.now ?? (() => new Date());
     this.actions = options.actions ?? HIGH_IMPACT_ACTIONS;
     this.risk = options.risk === undefined ? new RiskScorer({ now: this.now }) : options.risk;
+    this.freeze = options.freeze ?? null;
   }
 
   registerExecutor(action: string, executor: ActionExecutor): void {
@@ -191,7 +213,15 @@ export class MaintainerApprovalService {
     return -1;
   }
 
-  requestIntent(input: { action: string; target: string; reason: string; requestedBy: string; params?: Record<string, unknown> }): MaintainerIntent {
+  requestIntent(input: {
+    action: string;
+    target: string;
+    reason: string;
+    requestedBy: string;
+    params?: Record<string, unknown>;
+    /** Emergency freeze bypass (#194). Validated here, consumed on execution. */
+    bypassId?: string;
+  }): MaintainerIntent {
     const spec = this.actions[input.action];
     if (!spec) throw new ApprovalError('UNKNOWN_ACTION', `Unknown high-impact action ${input.action}`, 400);
     const requestedBy = String(input.requestedBy ?? '').trim();
@@ -200,6 +230,14 @@ export class MaintainerApprovalService {
     if (!requestedBy) throw new ApprovalError('REQUESTER_REQUIRED', 'requestedBy is required', 400);
     if (!target) throw new ApprovalError('TARGET_REQUIRED', 'target is required', 400);
     if (reason.length < 10) throw new ApprovalError('REASON_REQUIRED', 'reason must explain the action (min 10 chars)', 400);
+
+    this.freeze?.assertAllowed({
+      action: spec.action,
+      target,
+      actor: requestedBy,
+      bypassId: input.bypassId,
+      consume: false,
+    });
 
     const params = input.params ?? {};
     const created = this.now();
@@ -272,7 +310,13 @@ export class MaintainerApprovalService {
     return this.issueReceipt(intent, 'rejected', maintainerId, null, redactSecrets(String(why || 'rejected')));
   }
 
-  async execute(id: string, input: { executedBy: string; confirmation: string; params?: Record<string, unknown> }): Promise<IntentReceipt> {
+  async execute(id: string, input: {
+    executedBy: string;
+    confirmation: string;
+    params?: Record<string, unknown>;
+    /** Emergency freeze bypass (#194), consumed when the action executes. */
+    bypassId?: string;
+  }): Promise<IntentReceipt> {
     const intent = this.load(id);
     const spec = this.actions[intent.action];
     const needsSecondApprover = spec.requiresSecondApprover || intent.risk?.requiresSecondApprover === true;
@@ -289,6 +333,13 @@ export class MaintainerApprovalService {
     if (input.params !== undefined && sha256(canonicalJson(input.params)) !== intent.paramsHash) {
       throw new ApprovalError('PARAMS_CHANGED', 'Params differ from the declared intent; declare a new intent', 409);
     }
+    this.freeze?.assertAllowed({
+      action: intent.action,
+      target: intent.target,
+      actor: String(input.executedBy ?? '').trim(),
+      bypassId: input.bypassId,
+      consume: true,
+    });
     const executor = this.executors.get(intent.action);
     if (!executor) throw new ApprovalError('NO_EXECUTOR', `No executor registered for ${intent.action}`, 501);
 

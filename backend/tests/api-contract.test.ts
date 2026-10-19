@@ -230,7 +230,15 @@ describe('API contract — response envelopes', () => {
     // new one is a deliberate act and must be justified in review.
     assert.deepEqual(
       API_CONTRACT.filter((e) => e.responseKind === 'raw').map((e) => e.path).sort(),
-      ['/', '/api/audit/export', '/api/exports/:id', '/api/health', '/api/metrics', '/api/ready'].sort()
+      [
+        '/',
+        '/api/audit/export',
+        '/api/exports/:id',
+        '/api/health',
+        '/api/imports/invoices/template',
+        '/api/metrics',
+        '/api/ready',
+      ].sort()
     );
   });
 
@@ -417,7 +425,7 @@ describe('API contract — admin auth', () => {
   it('documents auth for every endpoint', () => {
     for (const endpoint of API_CONTRACT) {
       assert.ok(
-        ['none', 'admin', 'hmac', 'public'].includes(endpoint.auth),
+        ['none', 'admin', 'hmac', 'public', 'maintainer'].includes(endpoint.auth),
         `${endpoint.method} ${endpoint.path} has an unknown auth mode "${endpoint.auth}"`
       );
     }

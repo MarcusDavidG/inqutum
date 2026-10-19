@@ -36,6 +36,22 @@ import {
 import { jobsToOperations } from '../domain/partial-failures';
 import { ApprovalError, MaintainerApprovalService, type IntentStatus, type ReceiptOutcome } from '../ops/maintainer-approval';
 import { auditStore } from '../audit/audit-service';
+import { recordAuditEvent } from '../audit/record-event';
+import {
+  FreezeWindowError,
+  FreezeWindowService,
+  type FreezeWindowState,
+} from '../ops/freeze-window';
+import {
+  ComplianceSnapshotStore,
+  SnapshotError,
+  complianceSnapshotStore,
+} from '../audit/compliance-snapshot';
+import {
+  CounterpartyRiskError,
+  CounterpartyRiskService,
+  counterpartyRiskService,
+} from '../risk/counterparty-risk';
 import {
   NothingToRollBackError,
   ProjectionReplayService,
@@ -74,13 +90,40 @@ export interface OpsRouterOptions {
   replay?: ProjectionReplayService;
   /** Resumable record repair service for orphaned and inconsistent records. */
   repairService?: ResumableRepairService;
+  /** Operational freeze windows (#194). Defaults to the process-wide service. */
+  freeze?: FreezeWindowService;
+  /** Counterparty risk service (#191). Defaults to the process-wide scorer. */
+  risk?: CounterpartyRiskService;
+  /** Compliance snapshot store (#192). Defaults to the process-wide store. */
+  snapshots?: ComplianceSnapshotStore;
 }
 
-function defaultApprovals(): MaintainerApprovalService | null {
+const defaultFreezeService = new FreezeWindowService({
+  onAudit: (record) => {
+    try {
+      recordAuditEvent({
+        action: record.action,
+        actor: { type: 'maintainer', id: record.actorId },
+        scope: { entityType: 'system', entityId: record.windowId },
+        reason: record.reason,
+        metadata: {
+          ...(record.metadata ?? {}),
+          windowId: record.windowId,
+          ...(record.bypassId ? { bypassId: record.bypassId } : {}),
+        },
+      });
+    } catch (error) {
+      console.error('Freeze audit write failed:', error);
+    }
+  },
+});
+
+function defaultApprovals(freeze: FreezeWindowService): MaintainerApprovalService | null {
   const secret = process.env.MAINTAINER_INTENT_SECRET;
   if (!secret || secret.length < 16) return null;
   return new MaintainerApprovalService({
     secret,
+    freeze,
     onReceipt: (r) =>
       auditStore.recordEvent({
         action: 'MAINTAINER_ACTION',
@@ -117,10 +160,13 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
   const router = Router();
   const impersonation = options.impersonation ?? impersonationService;
   const admin = requireAdmin(options.adminToken);
-  const approvals = options.approvals === undefined ? defaultApprovals() : options.approvals;
+  const freeze = options.freeze ?? defaultFreezeService;
+  const approvals = options.approvals === undefined ? defaultApprovals(freeze) : options.approvals;
   const retries = options.jobs ? new PartialFailureRetryCoordinator(options.jobs) : null;
   const capabilities = options.capabilities === undefined ? capabilityServiceFromEnv() : options.capabilities;
   const config = options.adminConfig ?? adminConfig;
+  const risk = options.risk ?? counterpartyRiskService;
+  const snapshots = options.snapshots ?? complianceSnapshotStore;
   const replay =
     options.replay ??
     new ProjectionReplayService({
@@ -225,7 +271,10 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
     err instanceof ApprovalError ||
     err instanceof CapabilityError ||
     err instanceof AdminConfigError ||
-    err instanceof PolicyDryRunError
+    err instanceof PolicyDryRunError ||
+    err instanceof FreezeWindowError ||
+    err instanceof CounterpartyRiskError ||
+    err instanceof SnapshotError
       ? fail(res, req, err.httpStatus, err.code, err.message)
       : next(err);
 
@@ -237,6 +286,7 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
         reason: String(req.body?.reason ?? ''),
         requestedBy: String(req.body?.requestedBy ?? ''),
         params: req.body?.params && typeof req.body.params === 'object' ? req.body.params : {},
+        bypassId: typeof req.body?.bypassId === 'string' ? req.body.bypassId : undefined,
       });
       res.status(201).json({ success: true, data: intent, correlationId: req.correlationId });
     } catch (err) {
@@ -271,6 +321,7 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
         executedBy: String(req.body?.executedBy ?? ''),
         confirmation: String(req.body?.confirmation ?? ''),
         params: req.body?.params,
+        bypassId: typeof req.body?.bypassId === 'string' ? req.body.bypassId : undefined,
       });
       res.status(receipt.outcome === 'succeeded' ? 200 : 502).json({ success: receipt.outcome === 'succeeded', data: receipt, correlationId: req.correlationId });
     } catch (err) {
@@ -292,6 +343,204 @@ export function createOpsRouter(options: OpsRouterOptions): Router {
     const receipt = approvals!.getReceipt(req.params.id);
     if (!receipt) return fail(res, req, 404, 'RECEIPT_NOT_FOUND', 'Receipt not found');
     res.json({ success: true, data: { receipt, signatureValid: approvals!.verifyReceipt(receipt) }, correlationId: req.correlationId });
+  });
+
+  // -- Operational freeze windows (#194) -------------------------------------
+
+  router.post('/ops/freeze-windows', admin, (req, res, next) => {
+    try {
+      const window = freeze.schedule({
+        name: String(req.body?.name ?? ''),
+        reason: String(req.body?.reason ?? ''),
+        actions: Array.isArray(req.body?.actions) ? req.body.actions.map(String) : [],
+        targets: Array.isArray(req.body?.targets) ? req.body.targets.map(String) : undefined,
+        startsAt: req.body?.startsAt ?? new Date().toISOString(),
+        endsAt: String(req.body?.endsAt ?? ''),
+        createdBy: String(req.body?.createdBy ?? 'ops-admin'),
+      });
+      res.status(201).json({ success: true, data: window, correlationId: req.correlationId });
+    } catch (err) {
+      knownError(req, res, err, next);
+    }
+  });
+
+  router.get('/ops/freeze-windows/status', admin, (req, res) => {
+    const action = typeof req.query.action === 'string' ? req.query.action.trim() : '';
+    if (!action) {
+      return fail(res, req, 400, 'INVALID_FREEZE_WINDOW', 'action is required');
+    }
+    const target = typeof req.query.target === 'string' && req.query.target.trim()
+      ? req.query.target.trim()
+      : null;
+    res.json({ success: true, data: freeze.status(action, target), correlationId: req.correlationId });
+  });
+
+  router.get('/ops/freeze-windows', admin, (req, res) => {
+    const state = typeof req.query.state === 'string' ? (req.query.state as FreezeWindowState) : undefined;
+    if (state && !['scheduled', 'active', 'expired', 'revoked'].includes(state)) {
+      return fail(res, req, 400, 'INVALID_FREEZE_WINDOW', 'state must be scheduled, active, expired or revoked');
+    }
+    const action = typeof req.query.action === 'string' ? req.query.action.trim() : '';
+    const windows = freeze.listWindows({
+      state,
+      action: action || undefined,
+      target: typeof req.query.target === 'string' && req.query.target.trim()
+        ? req.query.target.trim()
+        : null,
+      includeExpired: req.query.includeExpired === 'true',
+    });
+    res.json({ success: true, data: { windows }, correlationId: req.correlationId });
+  });
+
+  router.get('/ops/freeze-windows/:id', admin, (req, res) => {
+    const window = freeze.getWindow(req.params.id);
+    if (!window) return fail(res, req, 404, 'FREEZE_WINDOW_NOT_FOUND', 'Freeze window not found');
+    res.json({ success: true, data: window, correlationId: req.correlationId });
+  });
+
+  router.post('/ops/freeze-windows/:id/revoke', admin, (req, res, next) => {
+    try {
+      const window = freeze.revoke(
+        req.params.id,
+        String(req.body?.actorId ?? 'ops-admin'),
+        String(req.body?.reason ?? '')
+      );
+      res.json({ success: true, data: window, correlationId: req.correlationId });
+    } catch (err) {
+      knownError(req, res, err, next);
+    }
+  });
+
+  router.post('/ops/freeze-windows/:id/bypasses', admin, (req, res, next) => {
+    try {
+      const bypass = freeze.issueBypass(req.params.id, {
+        action: String(req.body?.action ?? ''),
+        target: req.body?.target === undefined || req.body?.target === null ? null : String(req.body.target),
+        issuedTo: String(req.body?.issuedTo ?? ''),
+        reason: String(req.body?.reason ?? ''),
+      });
+      res.status(201).json({ success: true, data: bypass, correlationId: req.correlationId });
+    } catch (err) {
+      knownError(req, res, err, next);
+    }
+  });
+
+  router.get('/ops/freeze-windows/:id/bypasses', admin, (req, res) => {
+    if (!freeze.getWindow(req.params.id)) {
+      return fail(res, req, 404, 'FREEZE_WINDOW_NOT_FOUND', 'Freeze window not found');
+    }
+    const bypasses = freeze.listBypasses({
+      windowId: req.params.id,
+      includeUsed: req.query.includeUsed === 'true',
+    });
+    res.json({ success: true, data: { bypasses }, correlationId: req.correlationId });
+  });
+
+  // -- Compliance snapshots (#192) -------------------------------------------
+
+  router.get('/ops/compliance-snapshots/verify-chain', admin, (req, res) => {
+    res.json({
+      success: true,
+      data: { ...snapshots.verifyChain(), size: snapshots.size() },
+      correlationId: req.correlationId,
+    });
+  });
+
+  router.get('/ops/compliance-snapshots/by-event/:eventId', admin, (req, res) => {
+    const snapshot = snapshots.getByEventId(req.params.eventId);
+    if (!snapshot) return fail(res, req, 404, 'SNAPSHOT_NOT_FOUND', 'No snapshot for that audit event');
+    res.json({ success: true, data: snapshot, correlationId: req.correlationId });
+  });
+
+  router.get('/ops/compliance-snapshots', admin, (req, res) => {
+    const limit = req.query.limit === undefined ? undefined : Number(req.query.limit);
+    const offset = req.query.offset === undefined ? undefined : Number(req.query.offset);
+    const result = snapshots.list({
+      eventType: typeof req.query.eventType === 'string' ? req.query.eventType : undefined,
+      entityId: typeof req.query.entityId === 'string' ? req.query.entityId : undefined,
+      entityType: typeof req.query.entityType === 'string' ? req.query.entityType : undefined,
+      limit,
+      offset,
+    });
+    res.json({
+      success: true,
+      data: { snapshots: result.snapshots, total: result.total },
+      pagination: { limit: result.limit, offset: result.offset, total: result.total },
+      correlationId: req.correlationId,
+    });
+  });
+
+  router.get('/ops/compliance-snapshots/:id', admin, (req, res) => {
+    const snapshot = snapshots.get(req.params.id);
+    if (!snapshot) return fail(res, req, 404, 'SNAPSHOT_NOT_FOUND', 'Compliance snapshot not found');
+    res.json({ success: true, data: snapshot, correlationId: req.correlationId });
+  });
+
+  router.get('/ops/compliance-snapshots/:id/verify', admin, (req, res) => {
+    const snapshot = snapshots.get(req.params.id);
+    if (!snapshot) return fail(res, req, 404, 'SNAPSHOT_NOT_FOUND', 'Compliance snapshot not found');
+    res.json({
+      success: true,
+      data: { snapshotId: snapshot.id, eventId: snapshot.eventId, ...snapshots.verify(snapshot) },
+      correlationId: req.correlationId,
+    });
+  });
+
+  // -- Counterparty risk (#191) ----------------------------------------------
+
+  router.get('/ops/risk/counterparty/overrides', admin, (req, res) => {
+    const overrides = risk.listOverrides(req.query.includeExpired === 'true');
+    res.json({ success: true, data: { overrides }, correlationId: req.correlationId });
+  });
+
+  router.post('/ops/risk/counterparty/:subjectId/evaluate', admin, (req, res, next) => {
+    try {
+      const input =
+        req.body?.signals && typeof req.body.signals === 'object' ? req.body.signals : req.body ?? {};
+      const assessment = risk.evaluate(req.params.subjectId, input);
+      res.json({ success: true, data: assessment, correlationId: req.correlationId });
+    } catch (err) {
+      knownError(req, res, err, next);
+    }
+  });
+
+  router.get('/ops/risk/counterparty/:subjectId', admin, (req, res) => {
+    const assessment = risk.getLatest(req.params.subjectId);
+    if (!assessment) {
+      return fail(res, req, 404, 'RISK_ASSESSMENT_NOT_FOUND', 'No assessment for that counterparty');
+    }
+    res.json({ success: true, data: assessment, correlationId: req.correlationId });
+  });
+
+  router.put('/ops/risk/counterparty/:subjectId/override', admin, (req, res, next) => {
+    try {
+      const override = risk.setOverride({
+        subjectId: req.params.subjectId,
+        level: req.body?.level,
+        reason: String(req.body?.reason ?? ''),
+        actorId: String(req.body?.actorId ?? 'ops-admin'),
+        expiresAt: req.body?.expiresAt,
+      });
+      res.json({ success: true, data: override, correlationId: req.correlationId });
+    } catch (err) {
+      knownError(req, res, err, next);
+    }
+  });
+
+  router.delete('/ops/risk/counterparty/:subjectId/override', admin, (req, res, next) => {
+    try {
+      const cleared = risk.clearOverride(
+        req.params.subjectId,
+        String(req.body?.actorId ?? 'ops-admin'),
+        String(req.body?.reason ?? '')
+      );
+      if (!cleared) {
+        return fail(res, req, 404, 'RISK_ASSESSMENT_NOT_FOUND', 'No override for that counterparty');
+      }
+      res.json({ success: true, data: { cleared }, correlationId: req.correlationId });
+    } catch (err) {
+      knownError(req, res, err, next);
+    }
   });
 
   router.get('/ops/health', admin, async (req, res, next) => {

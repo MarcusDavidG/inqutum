@@ -25,7 +25,23 @@ export type AuditAction =
   | 'IMPERSONATION_ACTION_ALLOWED'
   | 'IMPERSONATION_ACTION_BLOCKED'
   | 'CAPABILITY_ISSUED'
-  | 'CONFIG_CHANGED';
+  | 'CONFIG_CHANGED'
+  // Operational freeze windows and emergency bypasses (#194)
+  | 'FREEZE_WINDOW_CREATED'
+  | 'FREEZE_WINDOW_REVOKED'
+  | 'FREEZE_BYPASS_ISSUED'
+  | 'FREEZE_BYPASS_USED'
+  // Settlement disputes (#190)
+  | 'DISPUTE_OPENED'
+  | 'DISPUTE_INVESTIGATING'
+  | 'DISPUTE_RESOLVED'
+  | 'DISPUTE_REJECTED'
+  | 'DISPUTE_REOPENED'
+  | 'DISPUTE_EVIDENCE_ADDED'
+  | 'DISPUTE_NOTE_ADDED'
+  // Counterparty risk controls (#191)
+  | 'COUNTERPARTY_RISK_OVERRIDDEN'
+  | 'COUNTERPARTY_RISK_OVERRIDE_CLEARED';
 
 export type AuditActorType = 'seller' | 'payer' | 'system' | 'maintainer';
 
@@ -37,7 +53,7 @@ export interface AuditActor {
 }
 
 export interface AuditScope {
-  entityType: 'invoice' | 'system' | 'stellar' | 'config';
+  entityType: 'invoice' | 'system' | 'stellar' | 'config' | 'dispute' | 'counterparty';
   entityId: string;
 }
 

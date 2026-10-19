@@ -25,7 +25,7 @@
  */
 
 /** How a caller is expected to authenticate. */
-export type ContractAuth = 'none' | 'admin' | 'hmac' | 'public';
+export type ContractAuth = 'none' | 'admin' | 'hmac' | 'public' | 'maintainer';
 
 /**
  * Which surface an endpoint belongs to. `public` is the storage-agnostic client
@@ -84,7 +84,7 @@ export interface ContractDrift {
 }
 
 /** Bumped when a breaking change to the declared surface is made deliberately. */
-export const CONTRACT_VERSION = '1.0.0';
+export const CONTRACT_VERSION = '1.1.0';
 
 /**
  * Express 4 encodes a mounted path as a regexp source of the shape
@@ -446,6 +446,27 @@ export const API_CONTRACT: ContractEndpoint[] = [
     responses: [200, 400, 404, 410],
   },
 
+  // ── Bulk import ─────────────────────────────────────────────────────────
+  {
+    method: 'GET',
+    path: '/api/imports/invoices/template',
+    group: 'public',
+    surfaces: PG_ONLY,
+    auth: 'none',
+    summary: 'Download the canonical invoice import CSV template.',
+    responseKind: 'raw',
+    responses: [200],
+  },
+  {
+    method: 'POST',
+    path: '/api/imports/invoices',
+    group: 'public',
+    surfaces: PG_ONLY,
+    auth: 'none',
+    summary: 'Bulk-import invoices from JSON or CSV. Dry run by default; `dryRun: false` writes.',
+    responses: [200, 400, 429, 500],
+  },
+
   // ── Stellar ─────────────────────────────────────────────────────────────
   {
     method: 'GET',
@@ -488,9 +509,18 @@ export const API_CONTRACT: ContractEndpoint[] = [
     path: '/api/payment/sync',
     group: 'admin',
     surfaces: PG_ONLY,
-    auth: 'none',
-    summary: 'Run a manual payment-monitor sync sweep.',
-    responses: [200, 500],
+    auth: 'maintainer',
+    summary: 'Run a manual payment-monitor sync sweep (maintainer or service).',
+    responses: [200, 401, 403, 500],
+  },
+  {
+    method: 'GET',
+    path: '/api/payment/monitor/status',
+    group: 'admin',
+    surfaces: PG_ONLY,
+    auth: 'maintainer',
+    summary: 'Payment monitor checkpoint and last sweep status (maintainer or service).',
+    responses: [200, 401, 403],
   },
 
   // ── Email (admin surface) ───────────────────────────────────────────────
@@ -529,6 +559,100 @@ export const API_CONTRACT: ContractEndpoint[] = [
     auth: 'none',
     summary: 'Provider delivery callback (bounce / complaint / delivered).',
     responses: [200, 400, 404],
+  },
+
+  // ── Settlement disputes (#190) ──────────────────────────────────────────
+  {
+    method: 'POST',
+    path: '/api/disputes',
+    group: 'public',
+    surfaces: BOTH,
+    auth: 'public',
+    summary: 'Open a settlement dispute with optional evidence bundles and notes. The opener is the authenticated actor.',
+    responses: [201, 400, 401, 403, 409],
+  },
+  {
+    method: 'GET',
+    path: '/api/disputes',
+    group: 'public',
+    surfaces: BOTH,
+    auth: 'public',
+    summary: 'List disputes. Maintainers see all; other callers see only disputes they participate in.',
+    responses: [200, 400, 401, 403],
+  },
+  {
+    method: 'GET',
+    path: '/api/disputes/:id',
+    group: 'public',
+    surfaces: BOTH,
+    auth: 'public',
+    summary: 'Read one dispute. Private evidence, notes and resolution detail are filtered by role and authorship.',
+    responses: [200, 401, 403, 404],
+  },
+  {
+    method: 'POST',
+    path: '/api/disputes/:id/evidence',
+    group: 'public',
+    surfaces: BOTH,
+    auth: 'public',
+    summary: 'Attach a labelled evidence reference (transaction, document, URL). File bodies are never accepted.',
+    responses: [201, 400, 401, 403, 404, 409],
+  },
+  {
+    method: 'POST',
+    path: '/api/disputes/:id/notes',
+    group: 'public',
+    surfaces: BOTH,
+    auth: 'public',
+    summary: 'Add a public or private note. Private notes are visible to their author and maintainers only.',
+    responses: [201, 400, 401, 403, 404, 409],
+  },
+  {
+    method: 'POST',
+    path: '/api/disputes/:id/investigate',
+    group: 'public',
+    surfaces: BOTH,
+    auth: 'public',
+    summary: 'Maintainer moves an open or reopened dispute into investigation.',
+    responses: [200, 400, 401, 403, 404, 409],
+  },
+  {
+    method: 'POST',
+    path: '/api/disputes/:id/resolve',
+    group: 'public',
+    surfaces: BOTH,
+    auth: 'public',
+    summary: 'Maintainer records the resolution summary and closes the dispute as resolved.',
+    responses: [200, 400, 401, 403, 404, 409],
+  },
+  {
+    method: 'POST',
+    path: '/api/disputes/:id/reject',
+    group: 'public',
+    surfaces: BOTH,
+    auth: 'public',
+    summary: 'Maintainer rejects the claim with a summary and closes the dispute.',
+    responses: [200, 400, 401, 403, 404, 409],
+  },
+  {
+    method: 'POST',
+    path: '/api/disputes/:id/reopen',
+    group: 'public',
+    surfaces: BOTH,
+    auth: 'public',
+    summary: 'The opener or a maintainer reopens a resolved or rejected dispute.',
+    responses: [200, 400, 401, 403, 404, 409],
+  },
+
+  // ── Counterparty risk summary (#191) ────────────────────────────────────
+  {
+    method: 'GET',
+    path: '/api/risk/counterparty/:subjectId',
+    group: 'public',
+    surfaces: BOTH,
+    auth: 'public',
+    summary: 'Safe risk summary for a counterparty. Omits scores, factor weights, raw signals and thresholds.',
+    responses: [200, 401],
   },
 
   // ── Jobs and ops (bearer admin token) ───────────────────────────────────
@@ -801,6 +925,165 @@ export const API_CONTRACT: ContractEndpoint[] = [
     auth: 'admin',
     summary: 'One intent receipt with its signature check.',
     responses: [200, 401, 403, 404],
+  },
+
+  // ── Operational freeze windows (#194) ───────────────────────────────────
+  {
+    method: 'POST',
+    path: '/api/ops/freeze-windows',
+    group: 'admin',
+    surfaces: PG_ONLY,
+    auth: 'admin',
+    summary: 'Schedule a scoped freeze window. Actions accept exact names or a trailing-* wildcard.',
+    responses: [201, 400, 401, 403],
+  },
+  {
+    method: 'GET',
+    path: '/api/ops/freeze-windows',
+    group: 'admin',
+    surfaces: PG_ONLY,
+    auth: 'admin',
+    summary: 'List freeze windows, filtered by state, action and target.',
+    responses: [200, 400, 401, 403],
+  },
+  {
+    method: 'GET',
+    path: '/api/ops/freeze-windows/status',
+    group: 'admin',
+    surfaces: PG_ONLY,
+    auth: 'admin',
+    summary: 'Whether one action/target pair is currently frozen and by which window.',
+    responses: [200, 400, 401, 403],
+  },
+  {
+    method: 'GET',
+    path: '/api/ops/freeze-windows/:id',
+    group: 'admin',
+    surfaces: PG_ONLY,
+    auth: 'admin',
+    summary: 'Read one freeze window and its scope.',
+    responses: [200, 401, 403, 404],
+  },
+  {
+    method: 'POST',
+    path: '/api/ops/freeze-windows/:id/revoke',
+    group: 'admin',
+    surfaces: PG_ONLY,
+    auth: 'admin',
+    summary: 'Revoke a scheduled or active freeze window before its scheduled end.',
+    responses: [200, 400, 401, 403, 404, 409],
+  },
+  {
+    method: 'POST',
+    path: '/api/ops/freeze-windows/:id/bypasses',
+    group: 'admin',
+    surfaces: PG_ONLY,
+    auth: 'admin',
+    summary: 'Issue a short-lived, single-use emergency bypass for one action and target.',
+    responses: [201, 400, 401, 403, 404, 409],
+  },
+  {
+    method: 'GET',
+    path: '/api/ops/freeze-windows/:id/bypasses',
+    group: 'admin',
+    surfaces: PG_ONLY,
+    auth: 'admin',
+    summary: 'List emergency bypasses issued for a freeze window.',
+    responses: [200, 401, 403, 404],
+  },
+
+  // ── Compliance snapshots (#192) ─────────────────────────────────────────
+  {
+    method: 'GET',
+    path: '/api/ops/compliance-snapshots',
+    group: 'admin',
+    surfaces: PG_ONLY,
+    auth: 'admin',
+    summary: 'List captured compliance snapshots, newest first, filtered by event or entity.',
+    responses: [200, 400, 401, 403],
+  },
+  {
+    method: 'GET',
+    path: '/api/ops/compliance-snapshots/verify-chain',
+    group: 'admin',
+    surfaces: PG_ONLY,
+    auth: 'admin',
+    summary: 'Verify every hash and previousHash link in the retained snapshot chain.',
+    responses: [200, 401, 403],
+  },
+  {
+    method: 'GET',
+    path: '/api/ops/compliance-snapshots/by-event/:eventId',
+    group: 'admin',
+    surfaces: PG_ONLY,
+    auth: 'admin',
+    summary: 'Find the single snapshot captured for an audit event id.',
+    responses: [200, 401, 403, 404],
+  },
+  {
+    method: 'GET',
+    path: '/api/ops/compliance-snapshots/:id',
+    group: 'admin',
+    surfaces: PG_ONLY,
+    auth: 'admin',
+    summary: 'Read one immutable compliance snapshot, including its schema version and hashes.',
+    responses: [200, 401, 403, 404],
+  },
+  {
+    method: 'GET',
+    path: '/api/ops/compliance-snapshots/:id/verify',
+    group: 'admin',
+    surfaces: PG_ONLY,
+    auth: 'admin',
+    summary: 'Recompute one snapshot payload and integrity hash to detect tampering.',
+    responses: [200, 401, 403, 404],
+  },
+
+  // ── Counterparty risk (#191) ────────────────────────────────────────────
+  {
+    method: 'GET',
+    path: '/api/ops/risk/counterparty/overrides',
+    group: 'admin',
+    surfaces: PG_ONLY,
+    auth: 'admin',
+    summary: 'List manual counterparty risk overrides, optionally including expired ones.',
+    responses: [200, 401, 403],
+  },
+  {
+    method: 'POST',
+    path: '/api/ops/risk/counterparty/:subjectId/evaluate',
+    group: 'admin',
+    surfaces: PG_ONLY,
+    auth: 'admin',
+    summary: 'Score a counterparty from documented signals and return the full factor breakdown.',
+    responses: [200, 400, 401, 403],
+  },
+  {
+    method: 'GET',
+    path: '/api/ops/risk/counterparty/:subjectId',
+    group: 'admin',
+    surfaces: PG_ONLY,
+    auth: 'admin',
+    summary: 'Maintainer detail view: score, factors, normalized signals, override and input hash.',
+    responses: [200, 401, 403, 404],
+  },
+  {
+    method: 'PUT',
+    path: '/api/ops/risk/counterparty/:subjectId/override',
+    group: 'admin',
+    surfaces: PG_ONLY,
+    auth: 'admin',
+    summary: 'Set a reasoned, audited manual risk override, optionally with an expiry.',
+    responses: [200, 400, 401, 403],
+  },
+  {
+    method: 'DELETE',
+    path: '/api/ops/risk/counterparty/:subjectId/override',
+    group: 'admin',
+    surfaces: PG_ONLY,
+    auth: 'admin',
+    summary: 'Clear a manual risk override and record who cleared it and why.',
+    responses: [200, 400, 401, 403, 404],
   },
 
   // ── Webhooks (only mounted when WEBHOOK_SIGNING_SECRET is set) ───────────

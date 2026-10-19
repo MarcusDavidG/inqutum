@@ -2,7 +2,7 @@
 
 Integration-facing HTTP contract for the Quittance/Inqutum backend.
 
-- **Contract version:** `1.0.0` (tracked in `CONTRACT_VERSION`, `backend/src/api/contract.ts`)
+- **Contract version:** `1.1.0` (tracked in `CONTRACT_VERSION`, `backend/src/api/contract.ts`)
 - **Enforced by:** `backend/tests/api-contract.test.ts`, which runs in CI
 - **Base path:** `/api`
 
@@ -89,7 +89,9 @@ which is also logged — quote it in a bug report.
 | Mode | Requirement |
 | --- | --- |
 | `none` | No credential. The invoice API is scoped by wallet key, not by login. |
+| `public` | Any authenticated caller: a wallet session (`end_user`) or a `MAINTAINER_API_TOKENS` bearer. Anonymous → 401. Used by disputes and safe risk summaries. |
 | `admin` | `Authorization: Bearer <JOBS_ADMIN_TOKEN>`. Compared with `timingSafeEqual`. Absent token → 401, disabled route → 403. |
+| `maintainer` | `Authorization: Bearer <token>` from `MAINTAINER_API_TOKENS` or `SERVICE_API_TOKENS`, with the route's permission (for example `monitor:sync`). Absent or wallet-session token → 401; a role without the permission → 403. |
 | `hmac` | Signed request body plus a timestamp header, verified against `WEBHOOK_SIGNING_SECRET` with a 5-minute tolerance and a replay window. Missing headers → 400 `MALFORMED_WEBHOOK`; stale timestamp → 408 `STALE_TIMESTAMP`; bad signature → 401 `INVALID_SIGNATURE`; replayed event id → 409 `DUPLICATE_EVENT`. |
 
 Sensitive admin actions (`PUT /api/ops/config/feature-flags/:flag`) need the
@@ -160,16 +162,29 @@ cursor. These semantics are pinned by
 | `GET` | `/api/notifications/routing-audit` | none | 200, 400 | Retrieve routing and override audit trail for a recipient. |
 | `POST` | `/api/exports` | none | 201, 400, 403, 500, 503 | Generate an export artifact. Returns an expiring download handle. |
 | `GET` | `/api/exports/:id` | none | 200, 400, 404, 410 | Download an export artifact. 410 once it has expired. |
+| `GET` | `/api/imports/invoices/template` | none | 200 | Download the canonical invoice import CSV template. |
+| `POST` | `/api/imports/invoices` | none | 200, 400, 429, 500 | Bulk-import invoices from JSON or CSV. Dry run by default; `dryRun: false` writes. |
 | `GET` | `/api/stellar/account` | none | 200 | Account balances from Horizon. |
 | `GET` | `/api/stellar/payments` | none | 200 | Recent payments for an account from Horizon. |
 | `GET` | `/api/stellar/transaction/:hash` | none | 200, 404 | Fetch one transaction by hash. |
 | `POST` | `/api/stellar/verify-payment` | none | 200, 400 | Verify a transaction hash against an expected asset and amount. |
+| `POST` | `/api/disputes` | public | 201, 400, 401, 403, 409 | Open a settlement dispute with optional evidence and notes. The opener is the authenticated actor. |
+| `GET` | `/api/disputes` | public | 200, 400, 401, 403 | List disputes. Maintainers see all; other callers see only their own. |
+| `GET` | `/api/disputes/:id` | public | 200, 401, 403, 404 | Read one dispute; private entries are filtered by role and authorship. |
+| `POST` | `/api/disputes/:id/evidence` | public | 201, 400, 401, 403, 404, 409 | Attach an evidence reference. File bodies are never accepted. |
+| `POST` | `/api/disputes/:id/notes` | public | 201, 400, 401, 403, 404, 409 | Add a public or private note. |
+| `POST` | `/api/disputes/:id/investigate` | public | 200, 400, 401, 403, 404, 409 | Maintainer moves an open or reopened dispute into investigation. |
+| `POST` | `/api/disputes/:id/resolve` | public | 200, 400, 401, 403, 404, 409 | Maintainer records the resolution summary. |
+| `POST` | `/api/disputes/:id/reject` | public | 200, 400, 401, 403, 404, 409 | Maintainer rejects the claim. |
+| `POST` | `/api/disputes/:id/reopen` | public | 200, 400, 401, 403, 404, 409 | Opener or maintainer reopens a closed dispute. |
+| `GET` | `/api/risk/counterparty/:subjectId` | public | 200, 401 | Safe risk summary, without scores, factors, signals or thresholds. |
 
 ### Admin / maintainer surface
 
 | Method | Path | Auth | Statuses | Purpose |
 | --- | --- | --- | --- | --- |
-| `POST` | `/api/payment/sync` | none | 200, 500 | Run a manual payment-monitor sync sweep. |
+| `POST` | `/api/payment/sync` | `maintainer` | 200, 401, 403, 500 | Run a manual payment-monitor sync sweep (maintainer or service). |
+| `GET` | `/api/payment/monitor/status` | `maintainer` | 200, 401, 403 | Payment monitor checkpoint and last sweep status. |
 | `POST` | `/api/email/send` | none | 200, 400, 409, 422, 429, 502 | Send an email through the configured provider. |
 | `GET` | `/api/email/deliveries` | none | 200 | Recent delivery attempts with provider status. |
 | `GET` | `/api/email/problems` | none | 200 | Bounced and complained deliveries that need follow-up. |
@@ -204,9 +219,78 @@ cursor. These semantics are pinned by
 | `POST` | `/api/ops/intents/:id/execute` | `admin` | 200, 400, 401, 403, 404, 409, 410, 501, 502 | Execute an intent with its confirmation phrase. 502 when the action itself failed. |
 | `GET` | `/api/ops/receipts` | `admin` | 200, 401, 403 | Signed intent receipts plus the first broken chain index. |
 | `GET` | `/api/ops/receipts/:id` | `admin` | 200, 401, 403, 404 | One intent receipt with its signature check. |
+| `POST` | `/api/ops/freeze-windows` | `admin` | 201, 400, 401, 403 | Schedule a scoped freeze window. |
+| `GET` | `/api/ops/freeze-windows` | `admin` | 200, 400, 401, 403 | List freeze windows by state, action and target. |
+| `GET` | `/api/ops/freeze-windows/status` | `admin` | 200, 400, 401, 403 | Whether one action/target pair is currently frozen. |
+| `GET` | `/api/ops/freeze-windows/:id` | `admin` | 200, 401, 403, 404 | Read one freeze window. |
+| `POST` | `/api/ops/freeze-windows/:id/revoke` | `admin` | 200, 400, 401, 403, 404, 409 | Revoke a freeze window early. |
+| `POST` | `/api/ops/freeze-windows/:id/bypasses` | `admin` | 201, 400, 401, 403, 404, 409 | Issue a short-lived, single-use emergency bypass. |
+| `GET` | `/api/ops/freeze-windows/:id/bypasses` | `admin` | 200, 401, 403, 404 | List bypasses issued for a window. |
+| `GET` | `/api/ops/compliance-snapshots` | `admin` | 200, 400, 401, 403 | List captured compliance snapshots. |
+| `GET` | `/api/ops/compliance-snapshots/verify-chain` | `admin` | 200, 401, 403 | Verify the retained snapshot hash chain. |
+| `GET` | `/api/ops/compliance-snapshots/by-event/:eventId` | `admin` | 200, 401, 403, 404 | Find the snapshot for one audit event id. |
+| `GET` | `/api/ops/compliance-snapshots/:id` | `admin` | 200, 401, 403, 404 | Read one immutable snapshot. |
+| `GET` | `/api/ops/compliance-snapshots/:id/verify` | `admin` | 200, 401, 403, 404 | Recompute one snapshot's hashes. |
+| `GET` | `/api/ops/risk/counterparty/overrides` | `admin` | 200, 401, 403 | List manual counterparty risk overrides. |
+| `POST` | `/api/ops/risk/counterparty/:subjectId/evaluate` | `admin` | 200, 400, 401, 403 | Score a counterparty and return the factor breakdown. |
+| `GET` | `/api/ops/risk/counterparty/:subjectId` | `admin` | 200, 401, 403, 404 | Full counterparty risk detail for maintainers. |
+| `PUT` | `/api/ops/risk/counterparty/:subjectId/override` | `admin` | 200, 400, 401, 403 | Set a reasoned, audited manual risk override. |
+| `DELETE` | `/api/ops/risk/counterparty/:subjectId/override` | `admin` | 200, 400, 401, 403, 404 | Clear a manual risk override. |
 | `POST` | `/api/webhooks/incoming` | `hmac` (conditional) | 200, 400, 401, 408, 409 | Signed inbound webhook receiver. Rejects unsigned, stale and replayed events. |
 
 `/api/webhooks/incoming` is mounted only when `WEBHOOK_SIGNING_SECRET` is set.
+
+### Disputes and counterparty risk
+
+Dispute routes need a wallet session or a maintainer bearer. The path id is the
+dispute id, not the settlement id:
+
+```bash
+# Open (the caller is the opener)
+curl -sX POST localhost:3001/api/disputes \
+  -H 'authorization: Bearer '"$SESSION_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"settlementId":"settle_123","reason":"Payment amount did not match the invoice","evidence":[{"label":"Horizon tx","kind":"transaction","reference":"abc…"}]}'
+# → 201 {"success":true,"data":{"id":"…","status":"OPEN",…}}
+
+# Maintainer resolution
+curl -sX POST localhost:3001/api/disputes/<id>/resolve \
+  -H 'authorization: Bearer '"$MAINTAINER_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"reason":"Verified against Horizon","summary":"The transfer matches the invoice amount."}'
+```
+
+The safe risk summary is intentionally thin. Thresholds, factor weights and raw
+signals are available only through the admin detail route:
+
+```bash
+curl -s localhost:3001/api/risk/counterparty/GBR… \
+  -H 'authorization: Bearer '"$SESSION_TOKEN"
+# → 200 {"success":true,"data":{"level":"medium","label":"Review recommended",…}}
+```
+
+See [DISPUTES.md](DISPUTES.md) and [COUNTERPARTY_RISK.md](COUNTERPARTY_RISK.md).
+
+### Freeze windows and compliance snapshots
+
+Freeze windows are checked when a high-impact intent is declared and again when
+it executes. A frozen action returns `423 ACTION_FROZEN`; a scoped emergency
+bypass (`bypassId`) is validated at declaration and consumed at execution.
+
+```bash
+curl -sX POST localhost:3001/api/ops/freeze-windows \
+  -H 'authorization: Bearer '"$JOBS_ADMIN_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"name":"Month-end close","reason":"No cancellations during reconciliation","actions":["invoice.cancel"],"startsAt":"2026-10-19T00:00:00Z","endsAt":"2026-10-20T00:00:00Z"}'
+
+curl -s localhost:3001/api/ops/compliance-snapshots/verify-chain \
+  -H 'authorization: Bearer '"$JOBS_ADMIN_TOKEN"
+# → 200 {"success":true,"data":{"valid":true,"checked":42,"size":42}}
+```
+
+Critical lifecycle events are snapshotted automatically by the audit write
+path. See [FREEZE_WINDOWS.md](FREEZE_WINDOWS.md) and
+[COMPLIANCE_SNAPSHOTS.md](COMPLIANCE_SNAPSHOTS.md).
 
 ## Integration flows
 
@@ -277,4 +361,6 @@ a dead-lettered job.
    required auth), bump `CONTRACT_VERSION` and note it in the PR.
 
 Related: [PAGINATION.md](PAGINATION.md), [SCHEMA_VERSIONING.md](SCHEMA_VERSIONING.md),
-[RUNBOOK.md](RUNBOOK.md), [JOBS.md](JOBS.md)
+[RUNBOOK.md](RUNBOOK.md), [JOBS.md](JOBS.md), [DISPUTES.md](DISPUTES.md),
+[COUNTERPARTY_RISK.md](COUNTERPARTY_RISK.md), [FREEZE_WINDOWS.md](FREEZE_WINDOWS.md),
+[COMPLIANCE_SNAPSHOTS.md](COMPLIANCE_SNAPSHOTS.md)

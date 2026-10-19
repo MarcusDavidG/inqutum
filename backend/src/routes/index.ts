@@ -19,10 +19,13 @@ import { healthHandler, readinessHandler } from '../health';
 import { PostgresIdempotencyStore } from '../idempotency/postgres-store';
 import { createAuthRouter } from './auth.routes';
 import { createReconciliationRouter } from './reconciliation.routes';
-import { createEmailRouter } from './email.routes';
 import { authenticate, requirePermission } from '../middleware/access-control';
 import { createQuotaRouter } from './quota.routes';
 import { createAnalyticsRouter } from './analytics.routes';
+import { createDisputeRouter } from './dispute.routes';
+import { createRiskRouter } from './risk.routes';
+import { createImportRouter } from './import.routes';
+import { createPaymentMonitorRouter } from './payment-monitor.routes';
 
 const router: Router = Router();
 
@@ -51,7 +54,6 @@ if (webhookRouter) router.use(webhookRouter);
 router.use(createImportRouter({ storage: postgresInvoiceStorage }));
 
 // Email delivery & queue routes
-router.use(createEmailRouter({ storage: postgresInvoiceStorage }));
 router.use(createQuotaRouter());
 router.use(createAnalyticsRouter());
 
@@ -60,6 +62,10 @@ router.use(createAuthRouter());
 
 // Read-only reconciliation dry run (operators and services only)
 router.use(createReconciliationRouter({ storage: postgresInvoiceStorage }));
+
+// Settlement disputes and safe counterparty risk summaries (#190, #191)
+router.use(createDisputeRouter());
+router.use(createRiskRouter());
 
 // Stellar routes. These proxy Horizon on the server's quota, so they need a
 // signed-in caller rather than being an open relay.

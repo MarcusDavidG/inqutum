@@ -4,6 +4,7 @@ import type { InvoiceCursor } from './invoice-cursor';
 import type { InvoiceStats } from './invoice-stats';
 import type { InvoiceStorage, OverduePendingInvoices, PayerInfo, StoredInvoice } from './invoice-storage';
 import { auditStore, AuditEvent, AuditFilter, AuditQueryResult } from '../audit/audit-service';
+import { recordAuditEvent } from '../audit/record-event';
 
 export class MemoryInvoiceStorage implements InvoiceStorage {
   readonly mode = 'in-memory';
@@ -77,7 +78,7 @@ export class MemoryInvoiceStorage implements InvoiceStorage {
   }
 
   async recordAuditEvent(event: Omit<AuditEvent, 'id' | 'timestamp'> & { timestamp?: string }): Promise<AuditEvent> {
-    return auditStore.recordEvent(event);
+    return recordAuditEvent(event);
   }
 
   async getAuditEvents(filter?: AuditFilter): Promise<AuditQueryResult> {

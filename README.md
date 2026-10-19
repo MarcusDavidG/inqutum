@@ -448,6 +448,7 @@ Background jobs (retries, dead-letter queue, running workers): [`docs/JOBS.md`](
 Stuck jobs and payments: [`docs/PARTIAL-FAILURES.md`](./docs/PARTIAL-FAILURES.md). Business rules: [`docs/POLICY.md`](./docs/POLICY.md). Activity timeline: [`docs/ACTIVITY-TIMELINE.md`](./docs/ACTIVITY-TIMELINE.md). Sandbox mode: [`docs/SANDBOX.md`](./docs/SANDBOX.md).
 Accessibility conventions and checks: [`docs/ACCESSIBILITY.md`](./docs/ACCESSIBILITY.md).
 Notifications: [`docs/NOTIFICATIONS.md`](./docs/NOTIFICATIONS.md). Data exports: [`docs/EXPORTS.md`](./docs/EXPORTS.md). Untrusted content and URL handling: [`docs/CONTENT_SAFETY.md`](./docs/CONTENT_SAFETY.md).
+Settlement disputes: [`docs/DISPUTES.md`](./docs/DISPUTES.md). Counterparty risk: [`docs/COUNTERPARTY_RISK.md`](./docs/COUNTERPARTY_RISK.md). Operational freezes: [`docs/FREEZE_WINDOWS.md`](./docs/FREEZE_WINDOWS.md). Compliance snapshots: [`docs/COMPLIANCE_SNAPSHOTS.md`](./docs/COMPLIANCE_SNAPSHOTS.md).
 
 ## Tests & CI
 

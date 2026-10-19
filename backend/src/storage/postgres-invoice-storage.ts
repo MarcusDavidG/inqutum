@@ -4,6 +4,7 @@ import type { InvoiceCursor } from './invoice-cursor';
 import type { InvoiceStats } from './invoice-stats';
 import type { InvoiceStorage, OverduePendingInvoices, PayerInfo, StoredInvoice } from './invoice-storage';
 import { auditStore, AuditEvent, AuditFilter, AuditQueryResult } from '../audit/audit-service';
+import { recordAuditEvent } from '../audit/record-event';
 
 /**
  * PostgreSQL storage backend. Same contract as the in-memory backend, but the
@@ -91,7 +92,7 @@ export class PostgresInvoiceStorage implements InvoiceStorage {
   }
 
   async recordAuditEvent(event: Omit<AuditEvent, 'id' | 'timestamp'> & { timestamp?: string }): Promise<AuditEvent> {
-    return auditStore.recordEvent(event);
+    return recordAuditEvent(event);
   }
 
   async getAuditEvents(filter?: AuditFilter): Promise<AuditQueryResult> {
